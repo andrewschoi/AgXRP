@@ -61,71 +61,102 @@ aioble.register_services(device_info_service)
 # and updates the sensor location.
 async def sensor_location_task(controller):
     while True:
-        connection, data = await sensor_desired_location_characteristic.written()
+        _, data = await sensor_desired_location_characteristic.written() #type: ignore
         print("Received desired position data: ", data)
         if data is not None:
-            # Action types (2 bytes uint16)
-            # 0 = Stop
-            # 1 = Move to absolute position
-            # 2 = probe at current position
-            # 3 = Move to home position
-            # 4 = Turn on pump of a certain amount
-            # 5 = run mission by id
-            #    - 2 bytes for mission id uint16
-            # 6 = re-calibrate gantry size
-            # 7 = change mission details by id
-            # 8 = delete mission by id
-            #    - 2 bytes for mission id uint16
-            # 9 = delete plant by id
-            #    - 2 bytes for plant id uint16
-            # Grab the fisrt byte of the data to determine the action
-            action = struct.unpack("<H", data[:2])[0]
+            """
+            Action types (2 bytes uint16)
+            0 -> Stop
+            1 -> Move To Absolute Position
+            2 -> Probe At Current Position
+            3 -> Move To Home Position
+            4 -> Turn On Pump Of A Certain Amount
+            5 -> Run Mission By Id
+                2 Bytes For Mission Id uint16
+            6 -> Re-calibrate Gantry Size
+            7 -> Change Mission Details By Id
+            8 -> Delete Mission By Id
+                2 Bytes For Mission Id uint16
+            9 -> Delete Plant By Id
+                2 Bytes For Plant Id uint16
+            Grab The First Byte Of The Data To Determine The Action
+            """
+
+            """
+            <H -> Little Endian unsigned short
+            """
+            action_bytes = data[:2]
+            action, = struct.unpack("<H", action_bytes)
+
             print("Mission action:", action)
             
             if action == 0:
                 controller.agbot.stop()
             elif action == 1:
-                _, x, y, _, _ = struct.unpack("<HHHHH", data)
+                # Need The 3-4, 5-6 Bytes For Position
+                position_bytes = data[2:6]
+                x, y = struct.unpack("<HH", position_bytes)
+                # _, x, y, _, _ = struct.unpack("<HHHHH", data)
+
                 print("Moving to: ", x, y)
+                
                 await controller.agbot.move_to(x, y)
             elif action == 2:
+                
                 print("Probing...")
+                
                 moisture_reading = await controller.agbot.read()
+                
                 print("Moisture reading: ", moisture_reading)
-
+            
             elif action == 3:
                 await controller.agbot.home()
             elif action == 5:
-                mission_id = struct.unpack("<H", data[2:4])[0]
+                mission_id_bytes = data[2:4]
+                mission_id, = struct.unpack("<H", mission_id_bytes)
+                
                 print("Running mission: ", mission_id)
+                
                 await controller.run_mission(mission_id=mission_id)
             elif action == 6:
+                
                 print("Recalibrating gantry size")
+                
                 await controller.setup_xy_max(force=True)
                 # move to 20, 20
                 await controller.agbot.move_to(20, 20)
             elif action == 8:
-                mission_id = struct.unpack("<H", data[2:4])[0]
+                mission_id_bytes = data[2:4]
+                mission_id, = struct.unpack("<H", mission_id_bytes)
                 print("Deleting mission: ", mission_id)
                 controller.memory.delete_mission(mission_id)
             elif action == 9:
-                plant_id = struct.unpack("<H", data[2:4])[0]    
+                plant_id_bytes = data[2:4]
+
+                plant_id, = struct.unpack("<H", plant_id_bytes)    
                 print("Deleting plant: ", plant_id)
                 controller.memory.delete_plant(plant_id)
             elif action == 10:
-                # add / remove plant from mission
-                # 2 bytes for mission id uint16
-                # 2 bytes for plant id uint16
-                # 1 byte for add / remove
-                #     0 = add
-                #     1 = remove
-                data = struct.unpack("<HHH", data[2:])
-                if data[2]:
-                    print("Adding plant to mission", data)
-                    controller.memory.add_plant_to_mission(data[0], data[1])
+                """
+                Add / remove plant from mission
+                2 bytes for mission id uint16
+                2 bytes for plant id uint16
+                1 byte for add / remove
+                    0 = add
+                    1 = remove
+                """
+                metadata_bytes = data[2:]
+                metadata = struct.unpack("<HHH", metadata_bytes)
+                if metadata[2]:
+
+                    print("Adding plant to mission", metadata)
+
+                    controller.memory.add_plant_to_mission(metadata[0], metadata[1])
                 else:
+
                     print("Removing plant from mission")
-                    controller.memory.remove_plant_from_mission(data[0], data[1])
+
+                    controller.memory.remove_plant_from_mission(metadata[0], metadata[1])
             else:
                 print("Invalid action")
             
@@ -134,7 +165,9 @@ async def sensor_location_task(controller):
 
 async def sensor_task(controller):
     homed, x, y, z = 0, 0, 0, 0
+
     print("Sensor location task started")
+
     while True:
         # temp_characteristic.write(struct.pack(">H", int(t)))
         if controller.agbot.xy.homed:
@@ -152,16 +185,21 @@ async def sensor_task(controller):
         await asyncio.sleep_ms(500)
 
 async def notify_gatt_client(connection):
-   if connection is None: return
+   if connection is None: 
+       return
    temp_characteristic.notify(connection)
    sensor_location_characteristic.notify(connection)
 
 async def file_write_task(controller):
     while True:
-        connection, data = await json_write_characteristic.written()
+        connection, data = await json_write_characteristic.written() # type: ignore
+
         print("Received json data: ", data)
+
         if data is not None:
-            file_id = int(struct.unpack("<B", data[:1])[0])
+            file_id_bytes = data[:1]
+            file_id, = list(map(int, struct.unpack("<B", file_id_bytes)))
+            
             if file_id == 0:
                 for packet in Utils.send_file_task(controller.memory.data, "JSON"):
                     json_characteristic.write(packet)
@@ -185,64 +223,75 @@ async def file_write_task(controller):
                         json_characteristic.notify(connection)
                         await asyncio.sleep_ms(100)
             elif file_id == 3:
-                # new plant data
-                # data
-                # byte 1-2 is the x position
-                # byte 3-4 is the y position
-                # byte 5-6 is the sense x position
-                # byte 7-8 is the sense y position
-                # byte 9 is the ml to water
-                # byte 10 is the moisture threshold
-                # byte 11-20 bytes is the plant name
+                """
+                New plant data
+                Data
+                Byte 1-2 -> plant x position
+                Byte 3-4 -> plant y position
+                Byte 5-6 -> sensor x position
+                Byte 7-8 -> sensor y position
+                Byte 9 -> ml to water
+                Byte 10 -> moisture threshold
+                Byte 11-20 -> plant name
+                """
 
                 struct_string = "<HHHHBB" + str(len(data) - 11) + "s"
+                plant_data_bytes = data[1:]
+                plant_x_coordinates, plant_y_coordinates, sensor_x_position, sensor_y_position, ml_to_water, moisture_threshold, plant_name = struct.unpack(struct_string, plant_data_bytes)
+
+                # Decode Plant Name
+                plant_name = plant_name.decode("utf-8")
 
                 plant = struct.unpack(struct_string, data[1:])
-                print("Plant data: ", plant)
-                print("X: ", plant[0])
-                print("Y: ", plant[1])
-                print("Sense X: ", plant[2])
-                print("Sense Y: ", plant[3])
-                print("ML to water: ", plant[4])
-                print("Moisture threshold: ", plant[5])
-                print("Plant name: ", plant[6].decode("utf-8"))
+                print("Plant Data: ", plant)
+                print("X: ", plant_x_coordinates)
+                print("Y: ", plant_y_coordinates)
+                print("Sense X: ", sensor_x_position)
+                print("Sense Y: ", sensor_y_position)
+                print("ML to water: ", ml_to_water)
+                print("Moisture threshold: ", moisture_threshold)
+                print("Plant name: ", plant_name)
 
-                controller.memory.add_plant(plant[6].decode("utf-8").rstrip(),
-                                            plant[2], plant[3],
-                                            plant[0], plant[1],
-                                            plant[5],
-                                            plant[4])
+                controller.memory.add_plant(plant_name.rstrip(),
+                                            sensor_x_position, sensor_y_position,
+                                            plant_x_coordinates, plant_y_coordinates,
+                                            moisture_threshold,
+                                            ml_to_water)
                 
                 # after adding resend the farm data
-                file_id = int(struct.unpack("<B", data[:1])[0])
+                file_id_bytes = data[:1]
+                file_id, = list(map(int, struct.unpack("<B", file_id_bytes)))
                 for packet in Utils.send_file_task(controller.memory.data, "JSON"):
                     json_characteristic.write(packet)
                     json_characteristic.notify(connection)
                     await asyncio.sleep_ms(100)
                     
             elif file_id == 4:
-                # new mission data
-                # data
-                # first byte is the mission id
-                # 2nd byte is hour
-                # 3r byte is minute
-                # 4th byte is action
-                # the rest is the mission name
+                """
+                New Mission Data
+                Byte 1 -> Mission Id
+                Byte 2 -> Hour
+                Byte 3 -> Minute
+                Byte 4 -> Action
+                Byte 5... -> Mission Name
+                """
                 struct_string = "<BBB" + str(len(data) - 4) + "s"
-
-                mission = struct.unpack(struct_string, data[1:])
-                print("hour: ", mission[0])
-                print("minute: ", mission[1])
-                print("action: ", mission[2])
-                print("Mission name: ", mission[3].decode("utf-8"))
+                time_and_name_bytes = data[1:]
+                hour, minute, action, name = struct.unpack(struct_string, time_and_name_bytes)
+                name = name.decode("utf-8")
+                print("hour: ", hour)
+                print("minute: ", minute)
+                print("action: ", action)
+                print("Mission name: ", name)
 
                 # Strip the mission name of any trailing spaces
-                controller.memory.add_mission(mission[3].decode("utf-8").rstrip(),
-                                              mission[0], mission[1],
-                                              mission[2])
+                controller.memory.add_mission(name.rstrip(),
+                                              hour, minute,
+                                              name)
                 
                 # after adding resend the farm data
-                file_id = int(struct.unpack("<B", data[:1])[0])
+                file_id_bytes = data[:1]
+                file_id, = list(map(int, struct.unpack("<B", file_id_bytes)))
                 for packet in Utils.send_file_task(controller.memory.data, "JSON"):
                     json_characteristic.write(packet)
                     json_characteristic.notify(connection)
@@ -259,20 +308,22 @@ async def file_write_task(controller):
                         await asyncio.sleep_ms(100)
 
             elif file_id == 99:
-                # set time data
-                # data
-                # byte 1 is the second
-                # byte 2 is the minute
-                # byte 3 is the hour
-                # byte 4 is the weekday
-                # byte 5 is the month
-                # byte 6 is the day
-                # byte 7 is the year
+                """
+                Set Time Data
+                Byte 1 -> Second
+                Byte 2 -> Minute
+                Byte 3 -> Hour
+                Byte 4 -> Weekday
+                Byte 5 -> Month
+                Byte 6 -> Day
+                Byte 7 -> Year
+                """
                 struct_string = "<BBBBBBB"
-                time = struct.unpack(struct_string, data[1:])
+                time_bytes = data[1:]
+                seconds, minutes, hours, weekdays, months, days, years = struct.unpack(struct_string, time_bytes)
                 print("Time: ", time)
                 try:
-                    controller.clock.set_time_piece_by_piece(time[0], time[1], time[2], time[3], time[4], time[5], time[6])
+                    controller.clock.set_time_piece_by_piece(seconds, minutes, hours, weekdays, months, days, years)
                 except Exception as e:
                     print("Error: %s" % e)
 
@@ -286,7 +337,7 @@ async def peripheral_task():
             name="FarmBot",
             services=[_DEVICE_INFO_UUID],
             appearance=_ADV_APPEARANCE_GENERIC_MULTISENSOR,
-         ) as connection:
+         ) as connection: # type: ignore
          print("Connection from", connection.device)
 
          while connection.is_connected():
@@ -294,12 +345,12 @@ async def peripheral_task():
             await asyncio.sleep(1)
    
 async def tasks(controller):
-    t0 = asyncio.create_task(sensor_location_task(controller))
-    t1 = asyncio.create_task(file_write_task(controller))
-    t2 = asyncio.create_task(sensor_task(controller))
-    t3 = asyncio.create_task(peripheral_task())
-    t4 = asyncio.create_task(controller.run())  
-    await asyncio.gather(t0, t1, t2, t3, t4)
+    sensor_location_async_task = asyncio.create_task(sensor_location_task(controller))
+    file_write_async_task = asyncio.create_task(file_write_task(controller))
+    sensor_async_task = asyncio.create_task(sensor_task(controller))
+    peripherial_async_task = asyncio.create_task(peripheral_task())
+    controller_async_task = asyncio.create_task(controller.run())  
+    await asyncio.gather(sensor_location_async_task, file_write_async_task, sensor_async_task, peripheral_task, controller_async_task) # type: ignore
 
 def main():
     try:
