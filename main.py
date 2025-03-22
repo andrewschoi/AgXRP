@@ -16,7 +16,12 @@ import bluetooth
 import machine
 
 import struct
-from copy import copy
+
+def copy(lst):
+    new_lst = []
+    for e in lst:
+        new_lst.append(e)
+    return new_lst
 
 def assertp(predicate, message="Something Bad Happened..."):
     if not predicate:
@@ -250,6 +255,7 @@ async def sensor_location_task(controller):
     while True:
         if not current_sensor_desired_location_characteristic_value:
             return
+        
         """
         Action types (2 bytes uint16)
         0 -> Stop
@@ -298,6 +304,7 @@ async def sensor_location_task(controller):
             assertp(False, "Not A Known Action")
             
         await asyncio.sleep_ms(100) 
+
 
 async def sensor_location_task_action_loop(controller):
     while True:
