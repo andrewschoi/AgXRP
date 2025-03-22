@@ -16,8 +16,16 @@ import bluetooth
 import machine
 
 import struct
+from copy import copy
 
-# device info
+def assertp(predicate, message="Something Bad Happened..."):
+    if not predicate:
+        raise Exception(message)
+
+class Interrupt(Exception):
+    pass
+
+# Device Info
 _DEVICE_INFO_UUID = bluetooth.UUID(0x181A)
 
 _ENV_SENSE_ACTUAL_LOC_UUID  = bluetooth.UUID("35f24b15-aa74-4cfb-a66a-a3252d67c264")
@@ -27,10 +35,11 @@ _FILE_WRITE_CHARACTERISTIC_UUID   = bluetooth.UUID("dc5d258b-ae55-48d3-8911-7c73
 
 _ADV_APPEARANCE_GENERIC_MULTISENSOR = const(1366)
 
-# How frequently to send advertising beacons.
+# How Frequently To Send Advertising Beacons.
 _ADV_INTERVAL_MS = 100
 
 device_info_service = aioble.Service(_DEVICE_INFO_UUID)
+
 sensor_location_characteristic = aioble.Characteristic(
     device_info_service, _ENV_SENSE_ACTUAL_LOC_UUID, read=True, notify=True
 )
@@ -49,8 +58,6 @@ json_write_characteristic = aioble.Characteristic(
 
 aioble.register_services(device_info_service)
 
-#########################  STATE    #########################
-previous_command = -1
 
 #########################  ACTIONS    #######################
 
@@ -133,64 +140,174 @@ async def perform_action_10(controller, data):
 
         controller.memory.remove_plant_from_mission(metadata[0], metadata[1])
 
-#########################  TASKS    #######################
+
+#########################  STATE    #########################
+previous_sensor_location_characteristic_value = []
+current_sensor_location_characteristic_value = []
+
+previous_sensor_desired_location_characteristic_value = []
+current_sensor_desired_location_characteristic_value = []
+
+previous_json_characteristic_value = []
+current_json_characteristic_value = []
+
+previous_json_write_characteristic_value = []
+current_json_write_characteristic_value = []
+
+
+#########################  HELPERS    #######################
+async def wait_for_write(characteristic):
+    global previous_sensor_location_characteristic_value
+    global current_sensor_location_characteristic_value
+
+    global previous_sensor_desired_location_characteristic_value
+    global current_sensor_desired_location_characteristic_value
+
+    global previous_json_characteristic_value
+    global current_json_characteristic_value
+
+    global previous_json_write_characteristic_value
+    global current_json_write_characteristic_value
+    
+    _, value = await characteristic.written(timeout_ms=5000)
+    
+    if characteristic is sensor_location_characteristic:
+        temp = copy(current_sensor_location_characteristic_value)
+        current_sensor_location_characteristic_value = copy(value)
+        previous_sensor_desired_location_characteristic_value = copy(temp)
+    elif characteristic is sensor_desired_location_characteristic:
+        temp = copy(current_sensor_desired_location_characteristic_value)
+        current_sensor_desired_location_characteristic_value = copy(value)
+        previous_sensor_desired_location_characteristic_value = copy(temp)
+    elif characteristic is json_characteristic:
+        temp = copy(current_json_characteristic_value)
+        current_json_characteristic_value = copy(value)
+        previous_json_characteristic_value = copy(temp)
+    elif characteristic is json_write_characteristic:
+        temp = copy(current_json_write_characteristic_value)
+        current_json_write_characteristic_value = copy(value)
+        previous_json_write_characteristic_value = copy(temp)
+    else:
+        assertp(False, "Not A Known Characteristic")
+
+    
+
+#########################  TASKS    #########################
+
+async def poll_for_new_commands(characteristic):
+    global previous_sensor_location_characteristic_value
+    global current_sensor_location_characteristic_value
+
+    global previous_sensor_location_characteristic_value
+    global current_sensor_desired_location_characteristic_value
+
+    global previous_json_characteristic_value
+    global current_json_characteristic_value
+
+    global previous_json_write_characteristic_value
+    global current_json_write_characteristic_value
+
+    while True:
+        try:
+            if characteristic is sensor_location_characteristic:
+                await wait_for_write(characteristic)
+                if previous_sensor_location_characteristic_value != current_sensor_location_characteristic_value:
+                    raise Interrupt
+            elif characteristic is sensor_desired_location_characteristic:
+                await wait_for_write(characteristic)
+                if previous_sensor_location_characteristic_value != current_sensor_desired_location_characteristic_value:
+                    raise Interrupt
+            elif characteristic is json_characteristic:
+                await wait_for_write(characteristic)
+                if previous_json_characteristic_value != current_json_characteristic_value:
+                    raise Interrupt
+            elif characteristic is json_write_characteristic:
+                await wait_for_write(characteristic)
+                if previous_json_write_characteristic_value != current_json_write_characteristic_value:
+                    raise Interrupt
+            else:
+                assertp(False, "Not A Known Characteristic")
+        except asyncio.TimeoutError:
+            continue
+        finally:
+            if characteristic is sensor_location_characteristic:
+                previous_sensor_location_characteristic_value = copy(current_sensor_location_characteristic_value)
+            elif characteristic is sensor_desired_location_characteristic:
+                previous_sensor_desired_location_characteristic_value = copy(current_sensor_desired_location_characteristic_value)
+            elif characteristic is json_characteristic:
+                previous_json_characteristic_value = copy(current_json_characteristic_value)
+            elif characteristic is json_write_characteristic:
+                previous_json_write_characteristic_value = copy(current_json_write_characteristic_value)
+            else:
+                assertp(False, "Not A Known Characteristic")
+
 
 # This is a task that waits for writes from the client
 # and updates the sensor location.
 async def sensor_location_task(controller):
+    global current_sensor_desired_location_characteristic_value
+
     while True:
-        _, data = await sensor_desired_location_characteristic.written() #type: ignore
-        print("Received desired position data: ", data)
-        if data is not None:
-            """
-            Action types (2 bytes uint16)
-            0 -> Stop
-            1 -> Move To Absolute Position
-            2 -> Probe At Current Position
-            3 -> Move To Home Position
-            4 -> Turn On Pump Of A Certain Amount
-            5 -> Run Mission By Id
-                2 Bytes For Mission Id uint16
-            6 -> Re-calibrate Gantry Size
-            7 -> Change Mission Details By Id
-            8 -> Delete Mission By Id
-                2 Bytes For Mission Id uint16
-            9 -> Delete Plant By Id
-                2 Bytes For Plant Id uint16
-            Grab The First Byte Of The Data To Determine The Action
-            """
+        if not current_sensor_desired_location_characteristic_value:
+            return
+        """
+        Action types (2 bytes uint16)
+        0 -> Stop
+        1 -> Move To Absolute Position
+        2 -> Probe At Current Position
+        3 -> Move To Home Position
+        4 -> Turn On Pump Of A Certain Amount
+        5 -> Run Mission By Id
+            2 Bytes For Mission Id uint16
+        6 -> Re-calibrate Gantry Size
+        7 -> Change Mission Details By Id
+        8 -> Delete Mission By Id
+            2 Bytes For Mission Id uint16
+        9 -> Delete Plant By Id
+            2 Bytes For Plant Id uint16
+        Grab The First Byte Of The Data To Determine The Action
+        """
 
-            """
-            <H -> Little Endian unsigned short
-            """
-            action_bytes = data[:2]
-            action, = struct.unpack("<H", action_bytes)
+        """
+        <H -> Little Endian unsigned short
+        """
+        action_bytes = current_sensor_desired_location_characteristic_value[:2]
+        action, = struct.unpack("<H", action_bytes)
 
-            print("Mission action:", action)
+        print("Mission action:", action)
+        
+        if action == 0:
+            await perform_action_0(controller)
+        elif action == 1:
+            await perform_action_1(controller, current_sensor_desired_location_characteristic_value)
+        elif action == 2:
+            await perform_action_2(controller)
+        elif action == 3:
+            await perform_action_3(controller)
+        elif action == 5:
+            await perform_action_5(controller, current_sensor_desired_location_characteristic_value)
+        elif action == 6:
+            await perform_action_6(controller)
+        elif action == 8:
+            await perform_action_8(controller, current_sensor_desired_location_characteristic_value)
+        elif action == 9:
+            await perform_action_9(controller, current_sensor_desired_location_characteristic_value)
+        elif action == 10:
+            await perform_action_10(controller, current_sensor_desired_location_characteristic_value)
+        else:
+            assertp(False, "Not A Known Action")
             
-            if action == 0:
-                await perform_action_0(controller)
-            elif action == 1:
-                await perform_action_1(controller, data)
-            elif action == 2:
-                await perform_action_2(controller)
-            elif action == 3:
-                await perform_action_3(controller)
-            elif action == 5:
-                await perform_action_5(controller, data)
-            elif action == 6:
-                await perform_action_6(controller)
-            elif action == 8:
-                await perform_action_8(controller, data)
-            elif action == 9:
-                await perform_action_9(controller, data)
-            elif action == 10:
-                await perform_action_10(controller, data)
-            else:
-                print("Invalid action")
-            
-           
         await asyncio.sleep_ms(100) 
+
+async def sensor_location_task_action_loop(controller):
+    while True:
+        try:
+            current_sensor_location_task = asyncio.create_task(sensor_location_task(controller))
+            poll_for_new_commands_task = asyncio.create_task(poll_for_new_commands(sensor_desired_location_characteristic))
+            await asyncio.gather(current_sensor_location_task, poll_for_new_commands_task)
+        except Interrupt as e:
+            continue
+
 
 async def sensor_task(controller):
     homed, x, y, z = 0, 0, 0, 0
