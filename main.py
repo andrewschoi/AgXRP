@@ -11,7 +11,7 @@ from micropython import const
 
 import uasyncio as asyncio
 import aioble
-import bluetooth
+from bluetooth import UUID
 
 import machine
 
@@ -31,12 +31,12 @@ class Interrupt(Exception):
     pass
 
 # Device Info
-_DEVICE_INFO_UUID = bluetooth.UUID(0x181A)
+_DEVICE_INFO_UUID = UUID(0x181A)
 
-_ENV_SENSE_ACTUAL_LOC_UUID  = bluetooth.UUID("35f24b15-aa74-4cfb-a66a-a3252d67c264")
-_ENV_SENSE_DESIRED_LOC_UUID = bluetooth.UUID("5bfd1e3d-e9e6-4272-b3fe-0be36b98fb9c")
-_FILE_SEND_CHARACTERISTIC_UUID   = bluetooth.UUID("16cbec17-9876-490c-bc71-85f24643a7d9")
-_FILE_WRITE_CHARACTERISTIC_UUID   = bluetooth.UUID("dc5d258b-ae55-48d3-8911-7c733b658cfd")
+SENSOR_ACTUAL_LOCATION_UUID  = UUID("35f24b15-aa74-4cfb-a66a-a3252d67c264")
+SENSOR_DESIRED_LOCATION_UUID = UUID("5bfd1e3d-e9e6-4272-b3fe-0be36b98fb9c")
+JSON_CHARACTERISTIC_UUID   = UUID("16cbec17-9876-490c-bc71-85f24643a7d9")
+JSON_WRITE_CHARACTERISTIC_UUID   = UUID("dc5d258b-ae55-48d3-8911-7c733b658cfd")
 
 _ADV_APPEARANCE_GENERIC_MULTISENSOR = const(1366)
 
@@ -46,26 +46,25 @@ _ADV_INTERVAL_MS = 100
 device_info_service = aioble.Service(_DEVICE_INFO_UUID)
 
 sensor_location_characteristic = aioble.Characteristic(
-    device_info_service, _ENV_SENSE_ACTUAL_LOC_UUID, read=True, notify=True
+    device_info_service, SENSOR_ACTUAL_LOCATION_UUID, read=True, notify=True
 )
 
 sensor_desired_location_characteristic = aioble.Characteristic( 
-    device_info_service, _ENV_SENSE_DESIRED_LOC_UUID, write=True, capture=True
+    device_info_service, SENSOR_DESIRED_LOCATION_UUID, write=True, capture=True
 )
 
 json_characteristic = aioble.Characteristic(
-    device_info_service, _FILE_SEND_CHARACTERISTIC_UUID, read=True, notify=True
+    device_info_service, JSON_CHARACTERISTIC_UUID, read=True, notify=True
 )
 
 json_write_characteristic = aioble.Characteristic(
-    device_info_service, _FILE_WRITE_CHARACTERISTIC_UUID, write=True, capture=True
+    device_info_service, JSON_WRITE_CHARACTERISTIC_UUID, write=True, capture=True
 )
 
 aioble.register_services(device_info_service)
 
 
 #########################  ACTIONS    #######################
-
 async def perform_action_0(controller):
     controller.agbot.stop()
 
@@ -108,6 +107,7 @@ async def perform_action_6(controller):
     await controller.setup_xy_max(force=True)
     # move to 20, 20
     await controller.agbot.move_to(20, 20)
+
 
 async def perform_action_8(controller, data):
     mission_id_bytes = data[2:4]
@@ -175,20 +175,19 @@ async def wait_for_write(characteristic):
     global current_json_write_characteristic_value
     
     _, value = await characteristic.written(timeout_ms=5000)
-    
-    if characteristic is sensor_location_characteristic:
+    if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
         temp = copy(current_sensor_location_characteristic_value)
         current_sensor_location_characteristic_value = copy(value)
         previous_sensor_desired_location_characteristic_value = copy(temp)
-    elif characteristic is sensor_desired_location_characteristic:
+    elif characteristic.uuid == SENSOR_DESIRED_LOCATION_UUID:
         temp = copy(current_sensor_desired_location_characteristic_value)
         current_sensor_desired_location_characteristic_value = copy(value)
         previous_sensor_desired_location_characteristic_value = copy(temp)
-    elif characteristic is json_characteristic:
+    elif characteristic.uuid == JSON_CHARACTERISTIC_UUID:
         temp = copy(current_json_characteristic_value)
         current_json_characteristic_value = copy(value)
         previous_json_characteristic_value = copy(temp)
-    elif characteristic is json_write_characteristic:
+    elif characteristic.uuid == JSON_WRITE_CHARACTERISTIC_UUID:
         temp = copy(current_json_write_characteristic_value)
         current_json_write_characteristic_value = copy(value)
         previous_json_write_characteristic_value = copy(temp)
@@ -213,38 +212,39 @@ async def poll_for_new_commands(characteristic):
     global current_json_write_characteristic_value
 
     while True:
+        print("poll for  new commands - " + str(characteristic.uuid))
         try:
-            if characteristic is sensor_location_characteristic:
+            if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
                 await wait_for_write(characteristic)
                 if previous_sensor_location_characteristic_value != current_sensor_location_characteristic_value:
                     raise Interrupt
-            elif characteristic is sensor_desired_location_characteristic:
+            elif characteristic.uuid == SENSOR_DESIRED_LOCATION_UUID:
                 await wait_for_write(characteristic)
-                if previous_sensor_location_characteristic_value != current_sensor_desired_location_characteristic_value:
+                if previous_sensor_desired_location_characteristic_value != current_sensor_desired_location_characteristic_value:
                     raise Interrupt
-            elif characteristic is json_characteristic:
+            elif characteristic.uuid == JSON_CHARACTERISTIC_UUID:
                 await wait_for_write(characteristic)
                 if previous_json_characteristic_value != current_json_characteristic_value:
                     raise Interrupt
-            elif characteristic is json_write_characteristic:
+            elif characteristic.uuid == JSON_WRITE_CHARACTERISTIC_UUID:
                 await wait_for_write(characteristic)
                 if previous_json_write_characteristic_value != current_json_write_characteristic_value:
                     raise Interrupt
             else:
-                assertp(False, "Not A Known Characteristic")
+                assertp(False, f"Not A Known Characteristic {characteristic}")
         except asyncio.TimeoutError:
             continue
         finally:
-            if characteristic is sensor_location_characteristic:
+            if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
                 previous_sensor_location_characteristic_value = copy(current_sensor_location_characteristic_value)
-            elif characteristic is sensor_desired_location_characteristic:
+            elif characteristic.uuid == SENSOR_DESIRED_LOCATION_UUID:
                 previous_sensor_desired_location_characteristic_value = copy(current_sensor_desired_location_characteristic_value)
-            elif characteristic is json_characteristic:
+            elif characteristic.uuid == JSON_CHARACTERISTIC_UUID:
                 previous_json_characteristic_value = copy(current_json_characteristic_value)
-            elif characteristic is json_write_characteristic:
+            elif characteristic.uuid == JSON_WRITE_CHARACTERISTIC_UUID:
                 previous_json_write_characteristic_value = copy(current_json_write_characteristic_value)
             else:
-                assertp(False, "Not A Known Characteristic")
+                assertp(False, f"Not A Known Characteristic {characteristic}")
 
 
 # This is a task that waits for writes from the client
@@ -314,6 +314,8 @@ async def sensor_location_task_action_loop(controller):
             await asyncio.gather(current_sensor_location_task, poll_for_new_commands_task)
         except Interrupt as e:
             continue
+        except Exception as e:
+            print(e)
 
 
 async def sensor_task(controller):
@@ -503,7 +505,8 @@ async def peripheral_task():
             await asyncio.sleep(1)
    
 async def tasks(controller):
-    sensor_location_async_task = asyncio.create_task(sensor_location_task(controller))
+    # sensor_location_async_task = asyncio.create_task(sensor_location_task(controller))
+    sensor_location_async_task = asyncio.create_task(sensor_location_task_action_loop(controller))
     file_write_async_task = asyncio.create_task(file_write_task(controller))
     sensor_async_task = asyncio.create_task(sensor_task(controller))
     peripheral_async_task = asyncio.create_task(peripheral_task())
