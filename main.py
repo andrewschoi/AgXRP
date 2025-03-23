@@ -17,12 +17,6 @@ import machine
 
 import struct
 
-def copy(lst):
-    new_lst = []
-    for e in lst:
-        new_lst.append(e)
-    return new_lst
-
 def assertp(predicate, message="Something Bad Happened..."):
     if not predicate:
         raise Exception(message)
@@ -124,14 +118,6 @@ async def perform_action_9(controller, data):
 
 
 async def perform_action_10(controller, data):
-    """
-    Add / remove plant from mission
-    2 bytes for mission id uint16
-    2 bytes for plant id uint16
-    1 byte for add / remove
-        0 = add
-        1 = remove
-    """
     metadata_bytes = data[2:]
     metadata = struct.unpack("<HHH", metadata_bytes)
     if metadata[2]:
@@ -147,21 +133,24 @@ async def perform_action_10(controller, data):
 
 
 #########################  STATE    #########################
-previous_sensor_location_characteristic_value = []
-current_sensor_location_characteristic_value = []
+previous_sensor_location_characteristic_value = b""
+current_sensor_location_characteristic_value = b""
 
-previous_sensor_desired_location_characteristic_value = []
-current_sensor_desired_location_characteristic_value = []
+previous_sensor_desired_location_characteristic_value = b""
+current_sensor_desired_location_characteristic_value = b""
 
-previous_json_characteristic_value = []
-current_json_characteristic_value = []
+previous_json_characteristic_value = b""
+current_json_characteristic_value = b""
 
-previous_json_write_characteristic_value = []
-current_json_write_characteristic_value = []
+previous_json_write_characteristic_value = b""
+current_json_write_characteristic_value = b""
 
 
 #########################  HELPERS    #######################
 async def wait_for_write(characteristic):
+    global previous_sensor_desired_location_characteristic_value
+    global current_sensor_desired_location_characteristic_value
+
     global previous_sensor_location_characteristic_value
     global current_sensor_location_characteristic_value
 
@@ -173,24 +162,23 @@ async def wait_for_write(characteristic):
 
     global previous_json_write_characteristic_value
     global current_json_write_characteristic_value
-    
     _, value = await characteristic.written(timeout_ms=5000)
     if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
-        temp = copy(current_sensor_location_characteristic_value)
-        current_sensor_location_characteristic_value = copy(value)
-        previous_sensor_desired_location_characteristic_value = copy(temp)
+        temp = current_sensor_location_characteristic_value
+        current_sensor_location_characteristic_value = value
+        previous_sensor_desired_location_characteristic_value = temp
     elif characteristic.uuid == SENSOR_DESIRED_LOCATION_UUID:
-        temp = copy(current_sensor_desired_location_characteristic_value)
-        current_sensor_desired_location_characteristic_value = copy(value)
-        previous_sensor_desired_location_characteristic_value = copy(temp)
+        temp = current_sensor_desired_location_characteristic_value
+        current_sensor_desired_location_characteristic_value = value
+        previous_sensor_desired_location_characteristic_value = temp
     elif characteristic.uuid == JSON_CHARACTERISTIC_UUID:
-        temp = copy(current_json_characteristic_value)
-        current_json_characteristic_value = copy(value)
-        previous_json_characteristic_value = copy(temp)
+        temp = current_json_characteristic_value
+        current_json_characteristic_value = value
+        previous_json_characteristic_value = temp
     elif characteristic.uuid == JSON_WRITE_CHARACTERISTIC_UUID:
-        temp = copy(current_json_write_characteristic_value)
-        current_json_write_characteristic_value = copy(value)
-        previous_json_write_characteristic_value = copy(temp)
+        temp = current_json_write_characteristic_value
+        current_json_write_characteristic_value = value
+        previous_json_write_characteristic_value = temp
     else:
         assertp(False, "Not A Known Characteristic")
 
@@ -212,7 +200,6 @@ async def poll_for_new_commands(characteristic):
     global current_json_write_characteristic_value
 
     while True:
-        print("poll for  new commands - " + str(characteristic.uuid))
         try:
             if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
                 await wait_for_write(characteristic)
@@ -236,15 +223,16 @@ async def poll_for_new_commands(characteristic):
             continue
         finally:
             if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
-                previous_sensor_location_characteristic_value = copy(current_sensor_location_characteristic_value)
+                previous_sensor_location_characteristic_value = current_sensor_location_characteristic_value
             elif characteristic.uuid == SENSOR_DESIRED_LOCATION_UUID:
-                previous_sensor_desired_location_characteristic_value = copy(current_sensor_desired_location_characteristic_value)
+                previous_sensor_desired_location_characteristic_value = current_sensor_desired_location_characteristic_value
             elif characteristic.uuid == JSON_CHARACTERISTIC_UUID:
-                previous_json_characteristic_value = copy(current_json_characteristic_value)
+                previous_json_characteristic_value = current_json_characteristic_value
             elif characteristic.uuid == JSON_WRITE_CHARACTERISTIC_UUID:
-                previous_json_write_characteristic_value = copy(current_json_write_characteristic_value)
+                previous_json_write_characteristic_value = current_json_write_characteristic_value
             else:
                 assertp(False, f"Not A Known Characteristic {characteristic}")
+            await asyncio.sleep_ms(5000)
 
 
 # This is a task that waits for writes from the client
@@ -278,6 +266,7 @@ async def sensor_location_task(controller):
         <H -> Little Endian unsigned short
         """
         action_bytes = current_sensor_desired_location_characteristic_value[:2]
+        print(f"Trying To Unpack {type(action_bytes)}")
         action, = struct.unpack("<H", action_bytes)
 
         print("Mission action:", action)
@@ -507,11 +496,12 @@ async def peripheral_task():
 async def tasks(controller):
     # sensor_location_async_task = asyncio.create_task(sensor_location_task(controller))
     sensor_location_async_task = asyncio.create_task(sensor_location_task_action_loop(controller))
-    file_write_async_task = asyncio.create_task(file_write_task(controller))
+    # file_write_async_task = asyncio.create_task(file_write_task(controller))
     sensor_async_task = asyncio.create_task(sensor_task(controller))
     peripheral_async_task = asyncio.create_task(peripheral_task())
     controller_async_task = asyncio.create_task(controller.run())  
-    await asyncio.gather(sensor_location_async_task, file_write_async_task, sensor_async_task, peripheral_async_task, controller_async_task) # type: ignore
+    await asyncio.gather(sensor_location_async_task, sensor_async_task, peripheral_async_task, controller_async_task) #type: ignore
+    # await asyncio.gather(sensor_location_async_task, file_write_async_task, sensor_async_task, peripheral_async_task, controller_async_task) # type: ignore
 
 def main():
     try:
