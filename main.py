@@ -16,15 +16,33 @@ from bluetooth import UUID
 import machine
 
 import struct
+import gc
+
+#########################  HELPERS    #######################
+def async_garbage_collect(func):
+    """
+    Garbage Collect Before Running [func]
+    """
+    async def collect_before_run(*args, **kwargs):
+        gc.collect()
+        result = await func(*args, **kwargs)
+        return result
+    return collect_before_run
+
 
 def assertp(predicate, message="Something Bad Happened..."):
+    """
+    Check If Predicate Is True, Otherwise Raise An Exception
+    Can Optionally Pass A Message
+    """
     if not predicate:
         raise Exception(message)
 
 class Interrupt(Exception):
     pass
 
-# Device Info
+#########################  BLUETOOTH    #######################
+
 _DEVICE_INFO_UUID = UUID(0x181A)
 
 SENSOR_ACTUAL_LOCATION_UUID  = UUID("35f24b15-aa74-4cfb-a66a-a3252d67c264")
@@ -32,10 +50,10 @@ SENSOR_DESIRED_LOCATION_UUID = UUID("5bfd1e3d-e9e6-4272-b3fe-0be36b98fb9c")
 JSON_CHARACTERISTIC_UUID   = UUID("16cbec17-9876-490c-bc71-85f24643a7d9")
 JSON_WRITE_CHARACTERISTIC_UUID   = UUID("dc5d258b-ae55-48d3-8911-7c733b658cfd")
 
-_ADV_APPEARANCE_GENERIC_MULTISENSOR = const(1366)
+ADVERTISING_APPEARANCE = const(1366)
 
 # How Frequently To Send Advertising Beacons.
-_ADV_INTERVAL_MS = 100
+ADVERTISING_INTERVAL_MILLISECONDS = 100
 
 device_info_service = aioble.Service(_DEVICE_INFO_UUID)
 
@@ -59,22 +77,20 @@ aioble.register_services(device_info_service)
 
 
 #########################  ACTIONS    #######################
-async def perform_action_0(controller):
+async def agbot_stop(controller):
     controller.agbot.stop()
 
 
-async def perform_action_1(controller, data):
+async def agbot_move_to(controller, data):
     # Need The 3-4, 5-6 Bytes For Position
     position_bytes = data[2:6]
     x, y = struct.unpack("<HH", position_bytes)
-    # _, x, y, _, _ = struct.unpack("<HHHHH", data)
-
     print("Moving to: ", x, y)
     
     await controller.agbot.move_to(x, y)
 
 
-async def perform_action_2(controller):
+async def agbot_get_moisture_reading(controller):
     print("Probing...")
                 
     moisture_reading = await controller.agbot.read()
@@ -82,11 +98,11 @@ async def perform_action_2(controller):
     print("Moisture reading: ", moisture_reading)
 
 
-async def perform_action_3(controller):
+async def agbot_go_home(controller):
     await controller.agbot.home()
 
 
-async def perform_action_5(controller, data):
+async def agbot_run_mission(controller, data):
     mission_id_bytes = data[2:4]
     mission_id, = struct.unpack("<H", mission_id_bytes)
     
@@ -95,7 +111,7 @@ async def perform_action_5(controller, data):
     await controller.run_mission(mission_id=mission_id)
 
 
-async def perform_action_6(controller):
+async def agbot_recalibrate_gantry_size(controller):
     print("Recalibrating gantry size")
     
     await controller.setup_xy_max(force=True)
@@ -103,21 +119,21 @@ async def perform_action_6(controller):
     await controller.agbot.move_to(20, 20)
 
 
-async def perform_action_8(controller, data):
+async def agbot_delete_mission(controller, data):
     mission_id_bytes = data[2:4]
     mission_id, = struct.unpack("<H", mission_id_bytes)
     print("Deleting mission: ", mission_id)
     controller.memory.delete_mission(mission_id)
 
 
-async def perform_action_9(controller, data):
+async def agbot_delete_plant(controller, data):
     plant_id_bytes = data[2:4]
     plant_id, = struct.unpack("<H", plant_id_bytes)    
     print("Deleting plant: ", plant_id)
     controller.memory.delete_plant(plant_id)
 
 
-async def perform_action_10(controller, data):
+async def agbot_modify_plants_in_mission(controller, data):
     metadata_bytes = data[2:]
     metadata = struct.unpack("<HHH", metadata_bytes)
     if metadata[2]:
@@ -145,9 +161,21 @@ current_json_characteristic_value = b""
 previous_json_write_characteristic_value = b""
 current_json_write_characteristic_value = b""
 
-
 #########################  HELPERS    #######################
+@async_garbage_collect
 async def wait_for_write(characteristic):
+    """
+    Waits For Write From On [characteristic]
+    When A Write Is Received, Updates The Current & Previous Characteristic Value
+
+    Example:
+    - sensor_location_characteristic is written to with value 1
+    -> previous_sensor_location_characteristic_value = b""
+    -> current_sensor_location_characteristic_value = b"1"
+    - sensor_location_characteristic is written to with value 2
+    -> previous_sensor_location_characteristic_value = b"1"
+    -> current_sensor_location_characteristic_value = b"2"
+    """
     global previous_sensor_desired_location_characteristic_value
     global current_sensor_desired_location_characteristic_value
 
@@ -185,8 +213,13 @@ async def wait_for_write(characteristic):
     
 
 #########################  TASKS    #########################
-
-async def poll_for_new_commands(characteristic):
+@async_garbage_collect
+async def poll_for_new_commands(characteristic, polling_interval=5000):
+    """
+    Polls For New Writes On [characteristic]
+    If A New Write Is Received And Is Different From The Value 
+    Corresponding To The Current Characteristic Value Raise An Interrupt
+    """
     global previous_sensor_location_characteristic_value
     global current_sensor_location_characteristic_value
 
@@ -232,81 +265,87 @@ async def poll_for_new_commands(characteristic):
                 previous_json_write_characteristic_value = current_json_write_characteristic_value
             else:
                 assertp(False, f"Not A Known Characteristic {characteristic}")
-            await asyncio.sleep_ms(5000)
+            await asyncio.sleep_ms(polling_interval)
 
 
 # This is a task that waits for writes from the client
 # and updates the sensor location.
+@async_garbage_collect
 async def sensor_location_task(controller):
     global current_sensor_desired_location_characteristic_value
+    if not current_sensor_desired_location_characteristic_value:
+        return
+    """
+    Action types (2 bytes uint16)
+    0 -> Stop
+    1 -> Move To Absolute Position
+    2 -> Probe At Current Position
+    3 -> Move To Home Position
+    4 -> Turn On Pump Of A Certain Amount
+    5 -> Run Mission By Id
+        2 Bytes For Mission Id uint16
+    6 -> Re-calibrate Gantry Size
+    7 -> Change Mission Details By Id
+    8 -> Delete Mission By Id
+        2 Bytes For Mission Id uint16
+    9 -> Delete Plant By Id
+        2 Bytes For Plant Id uint16
+    Grab The First Byte Of The Data To Determine The Action
+    """
 
-    while True:
-        if not current_sensor_desired_location_characteristic_value:
-            return
+    """
+    <H -> Little Endian unsigned short
+    """
+    action_bytes = current_sensor_desired_location_characteristic_value[:2]
+    print(f"Trying To Unpack {type(action_bytes)}")
+    action, = struct.unpack("<H", action_bytes)
+
+    print("Mission action:", action)
+    
+    if action == 0:
+        await agbot_stop(controller)
+    elif action == 1:
+        await agbot_move_to(controller, current_sensor_desired_location_characteristic_value)
+    elif action == 2:
+        await agbot_get_moisture_reading(controller)
+    elif action == 3:
+        await agbot_go_home(controller)
+    elif action == 5:
+        await agbot_run_mission(controller, current_sensor_desired_location_characteristic_value)
+    elif action == 6:
+        await agbot_recalibrate_gantry_size(controller)
+    elif action == 8:
+        await agbot_delete_mission(controller, current_sensor_desired_location_characteristic_value)
+    elif action == 9:
+        await agbot_delete_plant(controller, current_sensor_desired_location_characteristic_value)
+    elif action == 10:
+        await agbot_modify_plants_in_mission(controller, current_sensor_desired_location_characteristic_value)
+    else:
+        assertp(False, "Not A Known Action")
         
-        """
-        Action types (2 bytes uint16)
-        0 -> Stop
-        1 -> Move To Absolute Position
-        2 -> Probe At Current Position
-        3 -> Move To Home Position
-        4 -> Turn On Pump Of A Certain Amount
-        5 -> Run Mission By Id
-            2 Bytes For Mission Id uint16
-        6 -> Re-calibrate Gantry Size
-        7 -> Change Mission Details By Id
-        8 -> Delete Mission By Id
-            2 Bytes For Mission Id uint16
-        9 -> Delete Plant By Id
-            2 Bytes For Plant Id uint16
-        Grab The First Byte Of The Data To Determine The Action
-        """
+     
 
-        """
-        <H -> Little Endian unsigned short
-        """
-        action_bytes = current_sensor_desired_location_characteristic_value[:2]
-        print(f"Trying To Unpack {type(action_bytes)}")
-        action, = struct.unpack("<H", action_bytes)
-
-        print("Mission action:", action)
-        
-        if action == 0:
-            await perform_action_0(controller)
-        elif action == 1:
-            await perform_action_1(controller, current_sensor_desired_location_characteristic_value)
-        elif action == 2:
-            await perform_action_2(controller)
-        elif action == 3:
-            await perform_action_3(controller)
-        elif action == 5:
-            await perform_action_5(controller, current_sensor_desired_location_characteristic_value)
-        elif action == 6:
-            await perform_action_6(controller)
-        elif action == 8:
-            await perform_action_8(controller, current_sensor_desired_location_characteristic_value)
-        elif action == 9:
-            await perform_action_9(controller, current_sensor_desired_location_characteristic_value)
-        elif action == 10:
-            await perform_action_10(controller, current_sensor_desired_location_characteristic_value)
-        else:
-            assertp(False, "Not A Known Action")
-            
-        await asyncio.sleep_ms(100) 
-
-
+@async_garbage_collect
 async def sensor_location_task_action_loop(controller):
     while True:
+        current_sensor_location_task = None
+        poll_for_new_commands_task = None
         try:
             current_sensor_location_task = asyncio.create_task(sensor_location_task(controller))
             poll_for_new_commands_task = asyncio.create_task(poll_for_new_commands(sensor_desired_location_characteristic))
             await asyncio.gather(current_sensor_location_task, poll_for_new_commands_task)
         except Interrupt as e:
+            if current_sensor_location_task and not current_sensor_location_task.done():
+                current_sensor_location_task.cancel()
+            try:
+                await current_sensor_location_task
+            except asyncio.CancelledError:
+                print("Sensor location task cancelled.")
             continue
         except Exception as e:
             print(e)
 
-
+@async_garbage_collect
 async def sensor_task(controller):
     homed, x, y, z = 0, 0, 0, 0
 
@@ -328,13 +367,14 @@ async def sensor_task(controller):
         # print("sensor location data updated: ", homed, x, y, z)
         await asyncio.sleep_ms(500)
 
+@async_garbage_collect
 async def notify_gatt_client(connection):
    if connection is None: 
        return
    
    sensor_location_characteristic.notify(connection)
 
-
+@async_garbage_collect
 async def file_write_task(controller):
     while True:
         connection, data = await json_write_characteristic.written() # type: ignore
@@ -474,17 +514,17 @@ async def file_write_task(controller):
 
         await asyncio.sleep_ms(100)       
 
-
+@async_garbage_collect
 async def peripheral_task():
    while True:
       
       print("Advertising...")
       
       async with await aioble.advertise(
-            _ADV_INTERVAL_MS,
+            ADVERTISING_INTERVAL_MILLISECONDS,
             name="FarmBot",
             services=[_DEVICE_INFO_UUID],
-            appearance=_ADV_APPEARANCE_GENERIC_MULTISENSOR,
+            appearance=ADVERTISING_APPEARANCE,
          ) as connection: # type: ignore
       
          print("Connection from", connection.device)
