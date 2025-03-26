@@ -43,7 +43,7 @@ class Interrupt(Exception):
 
 #########################  BLUETOOTH    #######################
 
-_DEVICE_INFO_UUID = UUID(0x181A)
+DEVICE_UUID = UUID(0x181A)
 
 SENSOR_ACTUAL_LOCATION_UUID  = UUID("35f24b15-aa74-4cfb-a66a-a3252d67c264")
 SENSOR_DESIRED_LOCATION_UUID = UUID("5bfd1e3d-e9e6-4272-b3fe-0be36b98fb9c")
@@ -55,7 +55,7 @@ ADVERTISING_APPEARANCE = const(1366)
 # How Frequently To Send Advertising Beacons.
 ADVERTISING_INTERVAL_MILLISECONDS = 100
 
-device_info_service = aioble.Service(_DEVICE_INFO_UUID)
+device_info_service = aioble.Service(DEVICE_UUID)
 
 sensor_location_characteristic = aioble.Characteristic(
     device_info_service, SENSOR_ACTUAL_LOCATION_UUID, read=True, notify=True
@@ -86,15 +86,12 @@ async def agbot_move_to(controller, data):
     position_bytes = data[2:6]
     x, y = struct.unpack("<HH", position_bytes)
     print("Moving to: ", x, y)
-    
     await controller.agbot.move_to(x, y)
 
 
 async def agbot_get_moisture_reading(controller):
     print("Probing...")
-                
     moisture_reading = await controller.agbot.read()
-    
     print("Moisture reading: ", moisture_reading)
 
 
@@ -105,15 +102,12 @@ async def agbot_go_home(controller):
 async def agbot_run_mission(controller, data):
     mission_id_bytes = data[2:4]
     mission_id, = struct.unpack("<H", mission_id_bytes)
-    
     print("Running mission: ", mission_id)
-    
     await controller.run_mission(mission_id=mission_id)
 
 
 async def agbot_recalibrate_gantry_size(controller):
     print("Recalibrating gantry size")
-    
     await controller.setup_xy_max(force=True)
     # move to 20, 20
     await controller.agbot.move_to(20, 20)
@@ -137,14 +131,10 @@ async def agbot_modify_plants_in_mission(controller, data):
     metadata_bytes = data[2:]
     metadata = struct.unpack("<HHH", metadata_bytes)
     if metadata[2]:
-
         print("Adding plant to mission", metadata)
-
         controller.memory.add_plant_to_mission(metadata[0], metadata[1])
     else:
-
         print("Removing plant from mission")
-
         controller.memory.remove_plant_from_mission(metadata[0], metadata[1])
 
 
@@ -160,6 +150,7 @@ current_json_characteristic_value = b""
 
 previous_json_write_characteristic_value = b""
 current_json_write_characteristic_value = b""
+
 
 #########################  HELPERS    #######################
 @async_garbage_collect
@@ -190,7 +181,9 @@ async def wait_for_write(characteristic):
 
     global previous_json_write_characteristic_value
     global current_json_write_characteristic_value
+
     _, value = await characteristic.written(timeout_ms=5000)
+
     if characteristic.uuid == SENSOR_ACTUAL_LOCATION_UUID:
         temp = current_sensor_location_characteristic_value
         current_sensor_location_characteristic_value = value
@@ -210,11 +203,10 @@ async def wait_for_write(characteristic):
     else:
         assertp(False, "Not A Known Characteristic")
 
-    
 
 #########################  TASKS    #########################
 @async_garbage_collect
-async def poll_for_new_commands(characteristic, polling_interval=5000):
+async def poll_for_new_commands(characteristic, polling_interval_milliseconds=1000):
     """
     Polls For New Writes On [characteristic]
     If A New Write Is Received And Is Different From The Value 
@@ -265,7 +257,7 @@ async def poll_for_new_commands(characteristic, polling_interval=5000):
                 previous_json_write_characteristic_value = current_json_write_characteristic_value
             else:
                 assertp(False, f"Not A Known Characteristic {characteristic}")
-            await asyncio.sleep_ms(polling_interval)
+            await asyncio.sleep_ms(polling_interval_milliseconds)
 
 
 # This is a task that waits for writes from the client
@@ -323,7 +315,6 @@ async def sensor_location_task(controller):
     else:
         assertp(False, "Not A Known Action")
         
-     
 
 @async_garbage_collect
 async def sensor_location_task_action_loop(controller):
@@ -344,6 +335,7 @@ async def sensor_location_task_action_loop(controller):
             continue
         except Exception as e:
             print(e)
+
 
 @async_garbage_collect
 async def sensor_task(controller):
@@ -367,20 +359,19 @@ async def sensor_task(controller):
         # print("sensor location data updated: ", homed, x, y, z)
         await asyncio.sleep_ms(500)
 
+
 @async_garbage_collect
 async def notify_gatt_client(connection):
    if connection is None: 
        return
-   
    sensor_location_characteristic.notify(connection)
+
 
 @async_garbage_collect
 async def file_write_task(controller):
     while True:
         connection, data = await json_write_characteristic.written() # type: ignore
-
         print("Received json data: ", data)
-
         if data is not None:
             file_id_bytes = data[:1]
             file_id, = list(map(int, struct.unpack("<B", file_id_bytes)))
@@ -427,15 +418,9 @@ async def file_write_task(controller):
                 # Decode Plant Name
                 plant_name = plant_name.decode("utf-8")
 
-                plant = struct.unpack(struct_string, data[1:])
-                print("Plant Data: ", plant)
-                print("X: ", plant_x_coordinates)
-                print("Y: ", plant_y_coordinates)
-                print("Sense X: ", sensor_x_position)
-                print("Sense Y: ", sensor_y_position)
-                print("ML to water: ", ml_to_water)
-                print("Moisture threshold: ", moisture_threshold)
-                print("Plant name: ", plant_name)
+                plant = struct.unpack(struct_string, plant_data_bytes)
+                
+                print(f"Plant Data: {plant}\nX: {plant_x_coordinates}\nY: {plant_y_coordinates}\nSense X: {sensor_x_position}\nSense Y: {sensor_y_position}\nML to water: {ml_to_water}\nMoisture threshold: {moisture_threshold}\nPlant name: {plant_name}")
 
                 controller.memory.add_plant(plant_name.rstrip(),
                                             sensor_x_position, sensor_y_position,
@@ -464,10 +449,7 @@ async def file_write_task(controller):
                 time_and_name_bytes = data[1:]
                 hour, minute, action, name = struct.unpack(struct_string, time_and_name_bytes)
                 name = name.decode("utf-8")
-                print("hour: ", hour)
-                print("minute: ", minute)
-                print("action: ", action)
-                print("Mission name: ", name)
+                print(f"Hour: {hour}\nMinute: {minute}\nAction: {action}\nMission Name: {name}")
 
                 # Strip the mission name of any trailing spaces
                 controller.memory.add_mission(name.rstrip(),
@@ -514,6 +496,7 @@ async def file_write_task(controller):
 
         await asyncio.sleep_ms(100)       
 
+
 @async_garbage_collect
 async def peripheral_task():
    while True:
@@ -523,7 +506,7 @@ async def peripheral_task():
       async with await aioble.advertise(
             ADVERTISING_INTERVAL_MILLISECONDS,
             name="FarmBot",
-            services=[_DEVICE_INFO_UUID],
+            services=[DEVICE_UUID],
             appearance=ADVERTISING_APPEARANCE,
          ) as connection: # type: ignore
       
@@ -533,15 +516,15 @@ async def peripheral_task():
             await notify_gatt_client(connection)
             await asyncio.sleep(1)
    
+
 async def tasks(controller):
-    # sensor_location_async_task = asyncio.create_task(sensor_location_task(controller))
     sensor_location_async_task = asyncio.create_task(sensor_location_task_action_loop(controller))
-    # file_write_async_task = asyncio.create_task(file_write_task(controller))
+    file_write_async_task = asyncio.create_task(file_write_task(controller))
     sensor_async_task = asyncio.create_task(sensor_task(controller))
     peripheral_async_task = asyncio.create_task(peripheral_task())
     controller_async_task = asyncio.create_task(controller.run())  
-    await asyncio.gather(sensor_location_async_task, sensor_async_task, peripheral_async_task, controller_async_task) #type: ignore
-    # await asyncio.gather(sensor_location_async_task, file_write_async_task, sensor_async_task, peripheral_async_task, controller_async_task) # type: ignore
+    await asyncio.gather(sensor_location_async_task, file_write_async_task, sensor_async_task, peripheral_async_task, controller_async_task) # type: ignore
+
 
 def main():
     try:
